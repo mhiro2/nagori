@@ -2,8 +2,8 @@ use std::borrow::Cow;
 
 use nagori_core::{
     ClipboardContent, ClipboardEntry, EntryId, Sensitivity, extension_of, find_common_parent,
-    fold_home, is_text_safe_for_default_output, normalize_text, parent_for_display,
-    safe_preview_for_dto, split_path,
+    fold_home, is_normalization_boundary, is_text_safe_for_default_output, normalize_text,
+    parent_for_display, safe_preview_for_dto, split_path,
 };
 use serde::Serialize;
 
@@ -486,10 +486,6 @@ struct TruncationResult {
     elided_region: Option<(usize, usize)>,
 }
 
-/// Cap a preview body by line count first, then by byte length. Returns a
-/// head + sentinel + tail string with a single elided region in the
-/// middle. Falls back to a head-only cut when the body is small enough
-/// that head+tail would round-trip the entire string anyway.
 /// Search-hit hint for a truncated body: whether `query` matches inside the
 /// elided `raw[start..end]` window. Applies the same normalizer as the FTS
 /// pipeline (NFKC + lowercase + whitespace collapse) so the hint matches
@@ -525,11 +521,19 @@ fn elided_match_hint(
 /// every keystroke dominated the preview cost. When the stored
 /// `normalized_body` (the search document, `normalize_text` of the same plain
 /// text) is available, the check instead normalizes only the visible head and
-/// tail — bounded by the preview cap — and counts occurrences: a term occurs in
+/// tail — bounded by the preview cap — and counts occurrences, overlapping ones
+/// included: a term occurs in
 /// the hidden window when the whole body holds more of it than the visible
 /// parts do. A match straddling a cut counts as hidden, which errs toward
 /// warning. Rows without a search document fall back to normalizing the
 /// window.
+///
+/// NFKC composes across a byte cut (`か` before the cut and a combining
+/// `U+3099` after it become `が` in the body), so the visible parts are
+/// normalized only up to the nearest seam where each side normalizes on its
+/// own as it does in the body (see [`is_normalization_boundary`]). Text
+/// between a cut and its seam counts as hidden. A cut with no seam nearby
+/// (a long run of combining marks) is reported as a possible hit.
 fn elided_region_matches(
     raw: &str,
     (start, end): (usize, usize),
@@ -541,14 +545,72 @@ fn elided_region_matches(
         let normalized_region = normalize_text(&raw[start..end]);
         return terms.all(|term| normalized_region.contains(term));
     }
-    let head = normalize_text(&raw[..start]);
-    let tail = normalize_text(&raw[end..]);
+    let (Some(head_end), Some(tail_start)) = (
+        normalization_boundary_before(raw, start),
+        normalization_boundary_after(raw, end),
+    ) else {
+        return true;
+    };
+    let head = normalize_text(&raw[..head_end]);
+    let tail = normalize_text(&raw[tail_start..]);
     terms.all(|term| {
-        let total = normalized_body.matches(term).count();
-        total > 0 && total > head.matches(term).count() + tail.matches(term).count()
+        let total = overlapping_matches(normalized_body, term);
+        total > 0 && total > overlapping_matches(&head, term) + overlapping_matches(&tail, term)
     })
 }
 
+/// Occurrences of `needle` in `haystack`, overlapping ones included.
+///
+/// `str::matches` skips overlaps, so a self-overlapping term undercounts the
+/// body: `aa` occurs once in `xaaa` but once in its visible tail `aa` too,
+/// which hid the occurrence that straddles the cut.
+fn overlapping_matches(haystack: &str, needle: &str) -> usize {
+    let mut count = 0;
+    let mut from = 0;
+    while let Some(found) = haystack[from..].find(needle) {
+        count += 1;
+        let at = from + found;
+        from = at + haystack[at..].chars().next().map_or(1, char::len_utf8);
+    }
+    count
+}
+
+/// How far `elided_region_matches` looks from a cut for a normalization seam.
+const NORMALIZATION_BOUNDARY_SCAN_BYTES: usize = 1024;
+
+/// The nearest normalization boundary at or before the char boundary `from`,
+/// within `NORMALIZATION_BOUNDARY_SCAN_BYTES`.
+fn normalization_boundary_before(raw: &str, from: usize) -> Option<usize> {
+    let floor = from.saturating_sub(NORMALIZATION_BOUNDARY_SCAN_BYTES);
+    let mut at = from;
+    while !is_normalization_boundary(raw, at) {
+        let (prev, _) = raw[..at].char_indices().next_back()?;
+        if prev < floor {
+            return None;
+        }
+        at = prev;
+    }
+    Some(at)
+}
+
+/// The nearest normalization boundary at or after the char boundary `from`,
+/// within `NORMALIZATION_BOUNDARY_SCAN_BYTES`.
+fn normalization_boundary_after(raw: &str, from: usize) -> Option<usize> {
+    let ceiling = from.saturating_add(NORMALIZATION_BOUNDARY_SCAN_BYTES);
+    let mut at = from;
+    while !is_normalization_boundary(raw, at) {
+        let next = at + raw[at..].chars().next()?.len_utf8();
+        if next > ceiling {
+            return None;
+        }
+        at = next;
+    }
+    Some(at)
+}
+
+/// Cap a preview body by line count first, then by byte length. Returns a
+/// head + sentinel + tail string with a single elided region in the
+/// middle, or a head-only cut when the cap is too small to fit a sentinel.
 fn truncate_for_preview(value: &str, max_bytes: usize, max_lines: usize) -> TruncationResult {
     if value.len() <= max_bytes && line_count(value) <= max_lines {
         return TruncationResult {
@@ -566,7 +628,7 @@ fn truncate_for_preview(value: &str, max_bytes: usize, max_lines: usize) -> Trun
             return line_trimmed;
         }
     }
-    head_tail_truncate_utf8(value, max_bytes)
+    head_tail_truncate_utf8(value, max_bytes, max_lines)
 }
 
 fn line_count(value: &str) -> usize {
@@ -652,8 +714,11 @@ fn byte_offset_before_last_lines(value: &str, lines: usize) -> usize {
     0
 }
 
-fn head_tail_truncate_utf8(value: &str, max_bytes: usize) -> TruncationResult {
-    if value.len() <= max_bytes {
+/// Byte-cap truncation that also keeps each side within its share of
+/// `max_lines`, so a body that reaches this path because its line-trimmed
+/// form overflowed the byte cap still honours the line cap.
+fn head_tail_truncate_utf8(value: &str, max_bytes: usize, max_lines: usize) -> TruncationResult {
+    if value.len() <= max_bytes && line_count(value) <= max_lines {
         return TruncationResult {
             text: value.to_owned(),
             truncation: TruncationDto::None,
@@ -663,24 +728,18 @@ fn head_tail_truncate_utf8(value: &str, max_bytes: usize) -> TruncationResult {
     // Reserve room for the sentinel so the final string honours the byte
     // budget. If the sentinel itself doesn't fit, fall back to head-only.
     let half = max_bytes / 2;
-    // Probe sentinel length using the worst-case elided count.
-    let elided_bytes_estimate = value.len() - max_bytes;
-    let sentinel_probe = format!("\n… {elided_bytes_estimate} bytes elided …\n");
+    // Probe the sentinel with the whole body length: the real elided count
+    // never exceeds it, so the sentinel can never print more digits than the
+    // probe reserved room for.
+    let elided_bytes_upper_bound = value.len();
+    let sentinel_probe = format!("\n… {elided_bytes_upper_bound} bytes elided …\n");
     if sentinel_probe.len() + 16 > max_bytes {
         // Tiny cap: degrade to head-only ellipsis to keep the rendered
         // body coherent. Truncation is still flagged so the UI can warn.
-        let mut end = max_bytes.saturating_sub('…'.len_utf8());
-        while end > 0 && !value.is_char_boundary(end) {
-            end -= 1;
-        }
-        let mut out = value[..end].to_owned();
-        out.push('…');
-        return TruncationResult {
-            text: out,
-            truncation: TruncationDto::HeadOnly,
-            elided_region: Some((end, value.len())),
-        };
+        return head_only_truncate(value, max_bytes, max_lines);
     }
+    let tail_lines = max_lines / 2;
+    let head_lines = max_lines - tail_lines;
     let mut head_end = half.saturating_sub(sentinel_probe.len() / 2);
     while head_end > 0 && !value.is_char_boundary(head_end) {
         head_end -= 1;
@@ -691,19 +750,14 @@ fn head_tail_truncate_utf8(value: &str, max_bytes: usize) -> TruncationResult {
     while tail_start < value.len() && !value.is_char_boundary(tail_start) {
         tail_start += 1;
     }
+    // Both line offsets sit just past a `\n`, so they are char boundaries;
+    // shrinking the visible sides only widens the elided middle, which keeps
+    // the byte budget intact.
+    head_end = head_end.min(byte_offset_after_lines(value, head_lines));
+    tail_start = tail_start.max(byte_offset_before_last_lines(value, tail_lines));
     if tail_start <= head_end {
         // Defensive: pathological inputs (tiny `max_bytes`) — fall back.
-        let mut end = max_bytes.saturating_sub('…'.len_utf8());
-        while end > 0 && !value.is_char_boundary(end) {
-            end -= 1;
-        }
-        let mut out = value[..end].to_owned();
-        out.push('…');
-        return TruncationResult {
-            text: out,
-            truncation: TruncationDto::HeadOnly,
-            elided_region: Some((end, value.len())),
-        };
+        return head_only_truncate(value, max_bytes, max_lines);
     }
     let elided_bytes = tail_start - head_end;
     let sentinel = format!("\n… {elided_bytes} bytes elided …\n");
@@ -715,6 +769,24 @@ fn head_tail_truncate_utf8(value: &str, max_bytes: usize) -> TruncationResult {
         text: out,
         truncation: TruncationDto::HeadAndTail { elided_bytes },
         elided_region: Some((head_end, tail_start)),
+    }
+}
+
+/// Head-only ellipsis for caps too small to fit a head + sentinel + tail.
+/// Truncation is still flagged so the UI can warn.
+fn head_only_truncate(value: &str, max_bytes: usize, max_lines: usize) -> TruncationResult {
+    let mut end = max_bytes
+        .saturating_sub('…'.len_utf8())
+        .min(byte_offset_after_lines(value, max_lines));
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = value[..end].to_owned();
+    out.push('…');
+    TruncationResult {
+        text: out,
+        truncation: TruncationDto::HeadOnly,
+        elided_region: Some((end, value.len())),
     }
 }
 
@@ -1030,6 +1102,116 @@ mod tests {
         // First and last lines survive.
         assert!(dto.preview_text.starts_with("ln0\n"));
         assert!(dto.preview_text.contains("ln4999"));
+    }
+
+    #[test]
+    fn byte_truncation_stays_within_the_cap_when_the_elided_count_gains_a_digit() {
+        // The sentinel used to be sized from `len - cap`; the real elided
+        // count is larger, so lengths whose count rolls over to one more
+        // digit overshot the cap by a byte.
+        let cap = MAX_PREVIEW_BYTES;
+        for len in [cap + 10_000 - 10, cap + 99_990, cap + 99_995, cap + 999_990] {
+            let body = "a".repeat(len);
+            let result = truncate_for_preview(&body, cap, MAX_PREVIEW_LINES);
+            assert!(
+                result.text.len() <= cap,
+                "len {len}: preview is {} bytes, cap {cap}",
+                result.text.len()
+            );
+        }
+    }
+
+    #[test]
+    fn line_cap_holds_when_the_line_trimmed_body_overflows_the_byte_cap() {
+        // 4,002 lines filling the byte cap exactly: the line sentinel is
+        // longer than the two lines it replaces, so the line path overflows
+        // the byte cap and the byte path must still drop lines.
+        let mut body = format!("{}\n", "x".repeat(31)).repeat(4_001);
+        body.push_str(&"y".repeat(MAX_PREVIEW_BYTES - body.len()));
+        assert_eq!(body.len(), MAX_PREVIEW_BYTES);
+        assert_eq!(line_count(&body), 4_002);
+        let result = truncate_for_preview(&body, MAX_PREVIEW_BYTES, MAX_PREVIEW_LINES);
+        assert!(matches!(
+            result.truncation,
+            TruncationDto::HeadAndTail { .. }
+        ));
+        assert!(result.text.len() <= MAX_PREVIEW_BYTES);
+        // Head and tail lines plus the sentinel's blank and text lines.
+        assert!(result.text.lines().count() <= MAX_PREVIEW_LINES + 2);
+
+        // Many empty lines ahead of one long line: the byte cut alone kept
+        // tens of thousands of lines.
+        let body = format!("{}{}", "\n".repeat(100_000), "z".repeat(200_000));
+        let result = truncate_for_preview(&body, MAX_PREVIEW_BYTES, MAX_PREVIEW_LINES);
+        assert!(result.text.len() <= MAX_PREVIEW_BYTES);
+        assert!(result.text.lines().count() <= MAX_PREVIEW_LINES + 2);
+        assert!(result.text.ends_with('z'));
+    }
+
+    #[test]
+    fn elided_match_counts_a_hit_whose_cut_splits_a_composing_sequence() {
+        // NFD `か` + U+3099 composes to `が` in the body, so normalizing the
+        // head on its own saw one more `か` than the body holds there and hid
+        // the `か` inside the elided window.
+        let raw = "aか\u{3099}か b";
+        let start = "aか".len();
+        let end = "aか\u{3099}か".len();
+        let normalized_body = normalize_text(raw);
+        assert!(elided_region_matches(
+            raw,
+            (start, end),
+            &normalized_body,
+            "か"
+        ));
+        assert!(!elided_region_matches(
+            raw,
+            (start, end),
+            &normalized_body,
+            "b"
+        ));
+    }
+
+    #[test]
+    fn elided_match_counts_a_self_overlapping_hit_straddling_a_cut() {
+        let raw = "xaaa";
+        let normalized_body = normalize_text(raw);
+        assert!(elided_region_matches(raw, (1, 2), &normalized_body, "aa"));
+        assert!(!elided_region_matches(raw, (0, 1), &normalized_body, "aa"));
+    }
+
+    #[test]
+    fn elided_match_counts_hits_straddling_a_cut_next_to_a_composed_one() {
+        // A cut that splits a composing sequence must not let the head's
+        // extra count cancel a match straddling the other cut.
+        let raw = format!(
+            "{}bか\u{3099}{}bか{}",
+            "x".repeat(2_000),
+            "y".repeat(2_000),
+            "z".repeat(2_000)
+        );
+        let start = 2_000 + "bか".len();
+        let end = raw.rfind('か').expect("second か");
+        let normalized_body = normalize_text(&raw);
+        assert!(elided_region_matches(
+            &raw,
+            (start, end),
+            &normalized_body,
+            "bか"
+        ));
+        // A match straddling a cut in a body without whitespace.
+        let straddling = format!("{}needle{}", "x".repeat(2_000), "y".repeat(2_000));
+        assert!(elided_region_matches(
+            &straddling,
+            (2_000 + "nee".len(), straddling.len() - 1_000),
+            &normalize_text(&straddling),
+            "needle"
+        ));
+        assert!(!elided_region_matches(
+            &straddling,
+            (2_000 + "nee".len(), straddling.len() - 1_000),
+            &normalize_text(&straddling),
+            "absent"
+        ));
     }
 
     fn file_list_entry(paths: Vec<String>, sequence: &str) -> nagori_core::ClipboardEntry {

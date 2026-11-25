@@ -1,4 +1,5 @@
-use unicode_normalization::UnicodeNormalization;
+use unicode_normalization::char::canonical_combining_class;
+use unicode_normalization::{IsNormalized, UnicodeNormalization, is_nfkc_quick};
 
 /// Canonical text normalization.
 ///
@@ -30,6 +31,31 @@ pub fn normalize_text(input: &str) -> String {
         }
     }
     out
+}
+
+/// Whether [`normalize_text`] treats the char boundary `at` as a seam.
+///
+/// At a seam the normalized `text[..at]` and `text[at..]` read the same as
+/// the normalized `text` on either side of it, apart from how whitespace at
+/// the seam is collapsed and trimmed.
+///
+/// That holds at the ends of the text and before a char that is NFKC-stable
+/// with canonical combining class 0. Such a char never composes with what
+/// precedes it, and combining marks are never reordered across it, so nothing
+/// on one side can change how the other side normalizes. A combining mark
+/// (`U+3099` after `か` becomes `が`) or a compatibility char that decomposes
+/// into one (half-width `ﾞ`) does not qualify.
+#[must_use]
+pub fn is_normalization_boundary(text: &str, at: usize) -> bool {
+    if at == 0 {
+        return true;
+    }
+    text.get(at..).is_some_and(|rest| {
+        rest.chars().next().is_none_or(|ch| {
+            canonical_combining_class(ch) == 0
+                && is_nfkc_quick(std::iter::once(ch)) == IsNormalized::Yes
+        })
+    })
 }
 
 /// Returns `true` if `input` contains any CJK character.
@@ -77,6 +103,26 @@ pub fn has_cjk(input: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalization_boundaries_split_text_without_changing_its_normalization() {
+        let text = "aか\u{3099}ｶﾞ漢字 x";
+        let boundaries: Vec<usize> = (0..=text.len())
+            .filter(|&at| text.is_char_boundary(at) && is_normalization_boundary(text, at))
+            .collect();
+        // Not before the combining U+3099, nor before the half-width kana,
+        // which are compatibility chars (the voiced mark decomposes to U+3099).
+        assert_eq!(boundaries, vec![0, 1, 13, 16, 19, 20, 21], "{boundaries:?}");
+        let whole = normalize_text(text);
+        for at in boundaries {
+            let joined = normalize_text(&text[..at]) + &normalize_text(&text[at..]);
+            assert_eq!(
+                joined.replace(' ', ""),
+                whole.replace(' ', ""),
+                "split at {at}"
+            );
+        }
+    }
 
     #[test]
     fn normalizes_width_and_case() {

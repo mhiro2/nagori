@@ -1,9 +1,10 @@
 use nagori_core::{
     AiProviderKind, AppError, AppSettings, ClipboardEntry, EntryId, EntryRepository,
-    IPC_ROW_SCALAR_BYTES, MAX_DTO_LANGUAGE_BYTES, MAX_DTO_MIME_BYTES,
-    MAX_DTO_REPRESENTATION_SUMMARIES, MAX_DTO_SOURCE_APP_NAME_BYTES, MAX_RESPONSE_TEXT_WIRE_BYTES,
-    PREVIEW_MAX_CHARS, RepresentationSummary, Result, SearchQuery, is_text_safe_for_default_output,
-    json_escaped_len, truncate_on_char_boundary,
+    IPC_RANK_REASON_BYTES, IPC_ROW_SCALAR_BYTES, IPC_SUMMARY_SCALAR_BYTES, MAX_DTO_LABEL_BYTES,
+    MAX_DTO_LANGUAGE_BYTES, MAX_DTO_MIME_BYTES, MAX_DTO_REPRESENTATION_SUMMARIES,
+    MAX_DTO_SOURCE_APP_NAME_BYTES, MAX_RESPONSE_TEXT_WIRE_BYTES, PREVIEW_MAX_CHARS,
+    RepresentationSummary, Result, SearchQuery, is_text_safe_for_default_output, json_escaped_len,
+    truncate_on_char_boundary,
 };
 use nagori_ipc::{
     AddEntryRequest, AiOutputDto, ClearRequest, ClearResponse, CopyEntryRequest,
@@ -462,9 +463,17 @@ fn row_metadata_wire_len(entry: &ClipboardEntry, reps: &[RepresentationSummary])
             .source
             .as_ref()
             .and_then(|source| source.name.as_deref()),
-        None,
+        RowExtras::default(),
         reps,
     )
+}
+
+/// The strings and lists only a search row carries.
+#[derive(Default, Clone, Copy)]
+struct RowExtras<'a> {
+    language: Option<&'a str>,
+    label: Option<&'a str>,
+    rank_reasons: usize,
 }
 
 /// Shared cost model for the variable-length strings a row carries, each
@@ -472,7 +481,7 @@ fn row_metadata_wire_len(entry: &ClipboardEntry, reps: &[RepresentationSummary])
 fn wire_len_of_strings(
     preview: &str,
     source_app_name: Option<&str>,
-    language: Option<&str>,
+    extras: RowExtras<'_>,
     reps: &[RepresentationSummary],
 ) -> usize {
     let preview_len = json_escaped_len(truncate_on_char_boundary(preview, PREVIEW_MAX_CHARS * 4));
@@ -482,9 +491,13 @@ fn wire_len_of_strings(
             MAX_DTO_SOURCE_APP_NAME_BYTES,
         ))
     });
-    let language_len = language.map_or(0, |tag| {
+    let language_len = extras.language.map_or(0, |tag| {
         json_escaped_len(truncate_on_char_boundary(tag, MAX_DTO_LANGUAGE_BYTES))
     });
+    let label_len = extras.label.map_or(0, |label| {
+        json_escaped_len(truncate_on_char_boundary(label, MAX_DTO_LABEL_BYTES))
+    });
+    let rank_reasons_len = extras.rank_reasons.saturating_mul(IPC_RANK_REASON_BYTES);
     let summaries_len: usize = reps
         .iter()
         .take(MAX_DTO_REPRESENTATION_SUMMARIES)
@@ -493,21 +506,23 @@ fn wire_len_of_strings(
                 &rep.mime_type,
                 MAX_DTO_MIME_BYTES,
             ))
-            .saturating_add(64)
+            .saturating_add(IPC_SUMMARY_SCALAR_BYTES)
         })
         .sum();
     IPC_ROW_SCALAR_BYTES
         .saturating_add(preview_len)
         .saturating_add(source_len)
         .saturating_add(language_len)
+        .saturating_add(label_len)
+        .saturating_add(rank_reasons_len)
         .saturating_add(summaries_len)
 }
 
 /// Materialise search results while holding the response inside the IPC frame.
 ///
 /// Search rows carry no entry text, but they are not free: the preview, the
-/// source-app name, the language tag and the representation summaries are all
-/// strings, and `MAX_RESULT_LIMIT` (200) rows of them at their caps would
+/// source-app name, the language tag, the user-given name, the rank reasons
+/// and the representation summaries all take space, and `MAX_RESULT_LIMIT` (200) rows of them at their caps would
 /// exceed `MAX_IPC_BYTES`. Charging each row what it will actually occupy —
 /// and stopping at `MAX_RESPONSE_TEXT_WIRE_BYTES` — gives the client a bounded
 /// prefix, the same contract `entry_dtos_within_budget` provides for
@@ -526,7 +541,11 @@ fn search_dtos_within_budget(
         let row_cost = wire_len_of_strings(
             &result.preview,
             result.source_app_name.as_deref(),
-            result.language.as_deref(),
+            RowExtras {
+                language: result.language.as_deref(),
+                label: result.label.as_deref(),
+                rank_reasons: result.rank_reason.len(),
+            },
             reps,
         );
         if !dtos.is_empty() && used.saturating_add(row_cost) > MAX_RESPONSE_TEXT_WIRE_BYTES {
@@ -703,6 +722,66 @@ mod tests {
         assert!(
             encoded.len() <= nagori_core::MAX_IPC_BYTES,
             "the budgeted search response must fit the frame (got {} bytes)",
+            encoded.len()
+        );
+    }
+
+    #[test]
+    fn a_search_row_never_serialises_larger_than_its_charge() {
+        // The budget only holds if each row's JSON fits what it is charged.
+        // Fill every variable-length field past its cap with the most
+        // expensive escape, including the name and every rank reason.
+        use nagori_core::{RankReason, RepresentationRole};
+
+        let result = nagori_core::SearchResult {
+            entry_id: EntryId::new(),
+            content_kind: nagori_core::ContentKind::Code,
+            preview: "\u{1}".repeat(PREVIEW_MAX_CHARS * 4 + 64),
+            score: f32::MIN_POSITIVE,
+            created_at: time::OffsetDateTime::UNIX_EPOCH,
+            pinned: true,
+            sensitivity: nagori_core::Sensitivity::Public,
+            rank_reason: vec![
+                RankReason::NameMatch,
+                RankReason::ExactMatch,
+                RankReason::PrefixMatch,
+                RankReason::SubstringMatch,
+                RankReason::FullTextMatch,
+                RankReason::NgramMatch,
+                RankReason::SemanticMatch,
+                RankReason::Recent,
+                RankReason::FrequentlyUsed,
+                RankReason::Pinned,
+            ],
+            source_app_name: Some("\u{1}".repeat(MAX_DTO_SOURCE_APP_NAME_BYTES + 64)),
+            language: Some("\u{1}".repeat(MAX_DTO_LANGUAGE_BYTES + 64)),
+            image_width: Some(u32::MAX),
+            image_height: Some(u32::MAX),
+            label: Some("\u{1}".repeat(MAX_DTO_LABEL_BYTES + 64)),
+        };
+        let summaries: Vec<_> = (0..MAX_DTO_REPRESENTATION_SUMMARIES + 4)
+            .map(|_| RepresentationSummary {
+                role: RepresentationRole::PlainFallback,
+                mime_type: "\u{1}".repeat(MAX_DTO_MIME_BYTES + 32),
+                byte_count: u64::MAX,
+            })
+            .collect();
+        let charged = wire_len_of_strings(
+            &result.preview,
+            result.source_app_name.as_deref(),
+            RowExtras {
+                language: result.language.as_deref(),
+                label: result.label.as_deref(),
+                rank_reasons: result.rank_reason.len(),
+            },
+            &summaries,
+        );
+        let dto =
+            nagori_ipc::SearchResultDto::from(result).with_representation_summaries(&summaries);
+        let encoded = serde_json::to_vec(&dto).expect("row serialises");
+        assert!(
+            encoded.len() <= charged,
+            "a search row must fit its charge (got {} bytes, charged {charged})",
             encoded.len()
         );
     }

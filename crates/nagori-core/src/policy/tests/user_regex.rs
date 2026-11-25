@@ -112,6 +112,32 @@ fn user_regex_escaped_parens_do_not_count_toward_nesting() {
 }
 
 #[test]
+fn user_regex_parens_in_classes_and_comments_do_not_hide_nesting() {
+    // A `)` inside a character class or an `(?x)` comment is a literal; a
+    // paren scanner treated it as closing a group, so this stack of six
+    // quantified groups measured as depth 1.
+    let deep = "(?:[)](?:[)](?:[)](?:[)](?:[)](?:[)]a+)+)+)+)+)+)+";
+    let commented = "(?x)(?:# )\n(?:# )\n(?:# )\n(?:# )\n a+)+)+)+)+";
+    for pattern in [deep, commented] {
+        let settings = AppSettings {
+            regex_denylist: vec![pattern.to_owned()],
+            ..AppSettings::default()
+        };
+        let err = SensitivityClassifier::try_new(settings).unwrap_err();
+        assert!(
+            matches!(err, AppError::Policy(ref msg) if msg.contains("nesting depth")),
+            "expected nesting-limit Policy error for {pattern:?}, got {err:?}",
+        );
+    }
+    // Brackets inside a class are literals and add no nesting.
+    let settings = AppSettings {
+        regex_denylist: vec!["[((((]x".to_owned()],
+        ..AppSettings::default()
+    };
+    SensitivityClassifier::try_new(settings).expect("parens in a class are not nesting");
+}
+
+#[test]
 fn user_regex_compiles_within_budget() {
     // Sanity check that realistic patterns still load — the guard is
     // for adversarial input, not "anything with a quantifier".

@@ -505,8 +505,9 @@ fn sensitivity_from_reasons(reasons: &[SensitivityReason]) -> Sensitivity {
         )
     }) {
         // OTP joins the Secret bucket (rather than Private) so the
-        // durable body goes through `apply_secret_handling` and lands
-        // as `[REDACTED]` under the default `StoreRedacted`. Without
+        // durable body goes through `apply_secret_handling`; under the
+        // default `StoreRedacted` a bare code redacts to nothing but the
+        // marker and is dropped as fully redacted. Without
         // this, an OTP-shaped clip leaked the raw 6–8 digit code into
         // SQLite even though the preview was scrubbed — a regression
         // the README's "OTPs are redacted or blocked entirely" claim
@@ -651,33 +652,30 @@ fn redacted_regex_build_error(pattern: &str, err: &regex::Error) -> String {
     )
 }
 
-/// Count the deepest unescaped parenthesis nesting in `pattern`. We only
-/// inspect ASCII bytes — the regex DSL's metacharacters are all 7-bit, so
-/// multi-byte UTF-8 inside a character class or literal cannot perturb
-/// the count.
+/// Deepest group nesting in `pattern`, measured on the parsed syntax tree.
+///
+/// Scanning for parentheses miscounts: a `)` inside a character class such as
+/// `[)]` or in an `(?x)` comment is a literal, yet it closed a group for the
+/// scanner, so stacked quantified groups could slip under the limit. A pattern
+/// that does not parse counts as 0 and is rejected by the compile step, which
+/// reports it without echoing the pattern.
 fn max_paren_nesting(pattern: &str) -> usize {
-    let mut depth: usize = 0;
-    let mut max_depth: usize = 0;
-    let mut chars = pattern.chars();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '\\' => {
-                // Skip the escaped character so `\(` / `\)` don't perturb depth.
-                let _ = chars.next();
-            }
-            '(' => {
-                depth = depth.saturating_add(1);
-                if depth > max_depth {
-                    max_depth = depth;
-                }
-            }
-            ')' => {
-                depth = depth.saturating_sub(1);
-            }
-            _ => {}
+    regex_syntax::ast::parse::Parser::new()
+        .parse(pattern)
+        .map_or(0, |ast| group_depth(&ast))
+}
+
+fn group_depth(ast: &regex_syntax::ast::Ast) -> usize {
+    use regex_syntax::ast::Ast;
+    match ast {
+        Ast::Group(group) => 1 + group_depth(&group.ast),
+        Ast::Repetition(repetition) => group_depth(&repetition.ast),
+        Ast::Alternation(alternation) => {
+            alternation.asts.iter().map(group_depth).max().unwrap_or(0)
         }
+        Ast::Concat(concat) => concat.asts.iter().map(group_depth).max().unwrap_or(0),
+        _ => 0,
     }
-    max_depth
 }
 
 /// Whether a redacted body carries no information beyond `[REDACTED]` markers.

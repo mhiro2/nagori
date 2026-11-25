@@ -14,11 +14,12 @@ pub const MAX_IPC_BYTES: usize = 1024 * 1024;
 
 /// Upper bound for the user-tunable `max_entry_size_bytes` setting.
 ///
-/// Set to ~75% of [`MAX_IPC_BYTES`] so that even with JSON escaping (worst
-/// case 6× expansion for control characters, ~1.1× typical for ASCII text)
-/// and the envelope overhead, an entry that storage accepts can still cross
-/// the IPC boundary. Values above this would create a class of entries that
-/// the daemon stores but neither the desktop nor the CLI can read back.
+/// Set to ~75% of [`MAX_IPC_BYTES`], leaving room for typical JSON escaping
+/// (~1.1× for ASCII text) and the envelope overhead. Escape-dense text can
+/// still expand past the frame (up to 6× for control characters), so
+/// admission also checks the escaped length against
+/// [`MAX_ENTRY_TEXT_WIRE_BYTES`]. Together they keep the daemon from storing
+/// entries that neither the desktop nor the CLI can read back.
 pub const MAX_ENTRY_SIZE_BYTES: usize = (MAX_IPC_BYTES * 3) / 4;
 
 /// Hard cap on how many entries one "copy selection as one clip" action may
@@ -161,6 +162,24 @@ pub const MAX_DTO_LANGUAGE_BYTES: usize = 32;
 /// the dominant cost of a response.
 pub const MAX_DTO_REPRESENTATION_SUMMARIES: usize = 8;
 
+/// Longest user-given name a search-result DTO carries.
+///
+/// Names are validated at [`crate::LABEL_MAX_CHARS`] characters when set, but a
+/// hand-edited row is not bound by that, so the DTO truncates the name like the
+/// other row-supplied strings.
+pub const MAX_DTO_LABEL_BYTES: usize = crate::LABEL_MAX_CHARS * 4;
+
+/// Bytes charged for the fixed part of one representation summary's JSON.
+///
+/// Covers the field names, the role, a `u64` byte count and the separators:
+/// `{"mime_type":"","role":"plain_fallback","byte_count":18446744073709551615},`
+/// is 75 bytes.
+pub const IPC_SUMMARY_SCALAR_BYTES: usize = 80;
+
+/// Bytes charged for one rank reason in a search row, the longest variant name
+/// plus its quotes and separator with room to spare.
+pub const IPC_RANK_REASON_BYTES: usize = 24;
+
 /// Bytes charged for the fixed-width part of one entry row's JSON.
 ///
 /// The id, the three RFC 3339 timestamps, the flags, the counts, and every
@@ -181,7 +200,7 @@ pub const IPC_ROW_OVERHEAD_BYTES: usize = IPC_ROW_SCALAR_BYTES
     + crate::PREVIEW_MAX_CHARS * 4 * 6
     + MAX_DTO_SOURCE_APP_NAME_BYTES * 6
     + MAX_DTO_LANGUAGE_BYTES * 6
-    + MAX_DTO_REPRESENTATION_SUMMARIES * (MAX_DTO_MIME_BYTES * 6 + 64);
+    + MAX_DTO_REPRESENTATION_SUMMARIES * (MAX_DTO_MIME_BYTES * 6 + IPC_SUMMARY_SCALAR_BYTES);
 
 /// Longest prefix of `text` that is at most `max_bytes` long and ends on a
 /// character boundary. Used to enforce the DTO string caps without splitting a
@@ -214,7 +233,7 @@ pub const MAX_RESPONSE_TEXT_WIRE_BYTES: usize = MAX_IPC_BYTES - IPC_ENVELOPE_RES
 ///
 /// Admission measures [`json_escaped_len`] against this ceiling so that
 /// "storage accepted it" implies "a single-entry response fits the frame".
-/// Text that escapes to no more than ~1.32x its raw size (all ASCII prose,
+/// Text that escapes to no more than ~1.31x its raw size (all ASCII prose,
 /// JSON, source code, CJK) is unaffected; only escape-dense payloads are
 /// refused.
 pub const MAX_ENTRY_TEXT_WIRE_BYTES: usize = MAX_RESPONSE_TEXT_WIRE_BYTES - IPC_ROW_OVERHEAD_BYTES;

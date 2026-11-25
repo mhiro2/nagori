@@ -19,10 +19,11 @@ pub use image_signature::{
     ImageFormat, SUPPORTED_IMAGE_MIMES, detect as detect_image_signature, matches_declared_mime,
 };
 pub use limits::{
-    IPC_ENVELOPE_RESERVE_BYTES, IPC_ROW_OVERHEAD_BYTES, IPC_ROW_SCALAR_BYTES,
-    MAX_COMBINED_COPY_ENTRIES, MAX_DECODED_IMAGE_PIXELS, MAX_DTO_LANGUAGE_BYTES,
-    MAX_DTO_MIME_BYTES, MAX_DTO_REPRESENTATION_SUMMARIES, MAX_DTO_SOURCE_APP_NAME_BYTES,
-    MAX_ENTRY_SIZE_BYTES, MAX_ENTRY_TEXT_WIRE_BYTES, MAX_IMAGE_ENTRY_SIZE_BYTES, MAX_IPC_BYTES,
+    IPC_ENVELOPE_RESERVE_BYTES, IPC_RANK_REASON_BYTES, IPC_ROW_OVERHEAD_BYTES,
+    IPC_ROW_SCALAR_BYTES, IPC_SUMMARY_SCALAR_BYTES, MAX_COMBINED_COPY_ENTRIES,
+    MAX_DECODED_IMAGE_PIXELS, MAX_DTO_LABEL_BYTES, MAX_DTO_LANGUAGE_BYTES, MAX_DTO_MIME_BYTES,
+    MAX_DTO_REPRESENTATION_SUMMARIES, MAX_DTO_SOURCE_APP_NAME_BYTES, MAX_ENTRY_SIZE_BYTES,
+    MAX_ENTRY_TEXT_WIRE_BYTES, MAX_IMAGE_ENTRY_SIZE_BYTES, MAX_IPC_BYTES,
     MAX_RESPONSE_TEXT_WIRE_BYTES, ReadBudget, entry_text_fits_wire, json_escaped_len,
     truncate_on_char_boundary,
 };
@@ -45,4 +46,4 @@ pub use settings::{
     SecretHandling, SourceAppIdKind, UpdateChannel, password_manager_preset_rules, validate_hotkey,
 };
 pub use storage_location::{CloudSyncMatch, CloudSyncProvider, detect_cloud_sync};
-pub use text::{has_cjk, normalize_text};
+pub use text::{has_cjk, is_normalization_boundary, normalize_text};
