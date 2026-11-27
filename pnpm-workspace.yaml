@@ -21,7 +21,7 @@ catalogs:
     "@testing-library/svelte": 5.4.2
     "@testing-library/user-event": 14.6.13
     "@vitest/coverage-v8": 5.1.1
-    jsdom: 31.0.0
+    jsdom: 31.0.1
     vitest: 5.1.1
   tooling:
     "@types/node": 24.19.2
